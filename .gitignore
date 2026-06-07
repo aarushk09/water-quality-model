@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+myenv/
+.venv/
+venv/
+env/
+
+# Downloaded datasets (re-fetch via data.nwis_fetch / meteo_fetch / daymet_fetch)
+data/raw/**/*.parquet
+data/raw/*/
+*.rdb
+
+# Keep graph metadata needed to rebuild the pipeline
+!data/raw/stations.json
+!data/raw/edges.csv
+
+# Model checkpoints (large binary weights; re-train or download separately)
+checkpoints/**/*.pt
+checkpoints/**/epoch_*.pt
+
+# Training / experiment logs
+logs/
+
+# Generated plots and example outputs
+figures/
+fetch_example_out/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets
+.env
+.env.*
+credentials.json
+*.pem
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Cursor (local editor state)
+.cursor/

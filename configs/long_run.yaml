@@ -1,0 +1,80 @@
+# Long training run — high epoch budget, generous early stopping, frequent checkpoints.
+# Use: python3 train.py --config configs/long_run.yaml
+
+project_root: "."
+
+data:
+  temperature_rdb: "water_temperature.rdb"
+  dissolved_oxygen_rdb: "disolved_oxygen.rdb"
+  temp_value_column: "334112_00010"
+  do_value_column: "334113_00300"
+  site_no: "02334500"
+  raw_dir: "data/raw"
+  stations_json: "data/raw/stations.json"
+  edges_csv: "data/raw/edges.csv"
+  resample_minutes: 15
+  train_ratio: 0.70
+  val_ratio: 0.15
+
+model:
+  backbone: patchtst
+  use_revin: true
+  gat_hidden: 64
+  gat_heads: 4
+  gat_dropout: 0.15
+  patch_len: 16
+  patch_stride: 8
+  d_model: 128
+  n_heads: 4
+  n_layers: 2
+  dropout: 0.2
+  tcn_channels: [64, 64, 128]
+  tcn_kernel_size: 3
+
+forecast:
+  seq_len: 96
+  pred_len: 96
+
+physics:
+  lambda_physics: 0.01
+  huber_delta: 1.0
+
+training:
+  device: auto
+  seed: 42
+  batch_size: 32
+  epochs: 300
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  grad_clip: 0.5
+  lr_factor: 0.5
+  lr_patience: 6
+  min_lr: 1.0e-7
+  # Early stopping (set enable_early_stopping: false to run all epochs)
+  enable_early_stopping: true
+  early_stopping_patience: 40
+  min_epochs: 60
+  monitor_key: val_mse
+  # Checkpointing
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+  save_last_every_epoch: true
+  checkpoint_every_epochs: 10
+  keep_last_n_epoch_checkpoints: 5
+  eval_physical_every_epochs: 5
+  skip_nan_batches: true
+  max_consecutive_nan_epochs: 3
+  num_workers: 0
+  pin_memory: false
+
+metrics:
+  hypoxia_threshold_mg_l: 2.0
+  hypoxia_sensitivity_mg_l: 3.0
+  sudden_drop_mg_l: 1.0
+  sudden_drop_steps: 4
+
+explain:
+  explain_hypoxia: false
+  background_samples: 50
+  figures_dir: "figures"
+  use_shap: false

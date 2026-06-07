@@ -1,0 +1,53 @@
+# Chattahoochee River NWIS graph — Buford Dam multi-site causality
+# Site 02334500 = forecast target (below dam)
+name: "Chattahoochee River basin"
+
+huc8: "03180101"
+state_cd: "GA"
+bbox: "-84.6,33.4,-83.2,34.5"
+
+discovery_mode: seeds_only
+max_catalog_sites: 40
+resample_minutes: 15
+
+seed_sites:
+  - "02334430"   # Chattahoochee River AT Buford Dam (upstream release signal)
+  - "02334500"   # Chattahoochee River near Buford (forecast target)
+
+auxiliary_sites:
+  - "02335000"   # Near Norcross — downstream temp/gage
+  - "02335350"   # Crooked Creek near Norcross
+
+parameters:
+  temperature: "00010"
+  dissolved_oxygen: "00300"
+  discharge: "00060"
+  gage_height: "00065"
+
+parameter_codes: "00010,00300,00060,00065"
+
+start_date: "2010-07-01"
+end_date: "2025-06-30"
+
+min_paired_fraction: 0.50
+auxiliary_min_paired_fraction: 0.30
+interval: "iv"
+
+graph:
+  k_nn: 3
+  use_drainage_ordering: true
+  manual_edges:
+    - upstream: "02334430"
+      downstream: "02334500"
+      travel_minutes: 45
+    - upstream: "02334500"
+      downstream: "02335000"
+      travel_minutes: 90
+    - upstream: "02335000"
+      downstream: "02335350"
+      travel_minutes: 120
+
+output:
+  raw_dir: "data/raw"
+  stations_json: "data/raw/stations.json"
+  edges_csv: "data/raw/edges.csv"

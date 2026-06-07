@@ -1,0 +1,26 @@
+[
+  {
+    "site_no": "02334500",
+    "paired_fraction": 0.9972110827561065,
+    "role": "forecast",
+    "lat": 34.1261111,
+    "lon": -84.09338889,
+    "name": "CHATTAHOOCHEE RIVER NEAR BUFORD, GA"
+  },
+  {
+    "site_no": "02335000",
+    "paired_fraction": 0.9904317181289541,
+    "role": "auxiliary",
+    "lat": 33.9972222,
+    "lon": -84.2019444,
+    "name": "CHATTAHOOCHEE RIVER NEAR NORCROSS, GA"
+  },
+  {
+    "site_no": "02335350",
+    "paired_fraction": 0.9940563447853088,
+    "role": "auxiliary",
+    "lat": 33.965,
+    "lon": -84.2647222,
+    "name": "CROOKED CREEK NEAR NORCROSS, GA"
+  }
+]

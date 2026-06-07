@@ -1,0 +1,4 @@
+upstream,downstream,travel_minutes,travel_steps
+02334430,02334500,45.0,3
+02334500,02335000,90.0,6
+02335000,02335350,120.0,8

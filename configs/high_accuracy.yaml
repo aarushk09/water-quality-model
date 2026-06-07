@@ -1,0 +1,111 @@
+# Physics-informed training — meteo + multi-site dam graph
+# 1) Fetch NWIS graph: python -m data.nwis_fetch --config configs/chattahoochee_graph.yaml
+# 2) Fetch meteo:       python -m data.meteo_fetch --config configs/high_accuracy.yaml
+# 3) Train:             python3 train.py --config configs/high_accuracy.yaml --no-early-stop
+
+project_root: "."
+
+data:
+  stations_json: "data/raw/stations.json"
+  edges_csv: "data/raw/edges.csv"
+  raw_dir: "data/raw"
+  temperature_rdb: "water_temperature.rdb"
+  dissolved_oxygen_rdb: "disolved_oxygen.rdb"
+  temp_value_column: "334112_00010"
+  do_value_column: "334113_00300"
+  site_no: "02334500"
+  forecast_site: "02334500"  # metrics computed on this node only
+  resample_minutes: 15
+  train_ratio: 0.70
+  val_ratio: 0.15
+
+meteo:
+  enabled: true
+  # lat/lon inferred from stations.json site_no if omitted
+  timezone: America/New_York
+  filename: meteo.parquet
+  # start_date / end_date inferred from NWIS iv.parquet if omitted
+
+model:
+  backbone: patchtst
+  use_revin: true
+  use_horizon_decoder: true
+  use_physics_head: true
+  use_ar_refinement: true
+  use_residual_baseline: true
+  use_local_conv: true
+  gat_hidden: 128
+  gat_heads: 4
+  gat_dropout: 0.1
+  patch_len: 12
+  patch_stride: 4
+  d_model: 192
+  n_heads: 8
+  n_layers: 3
+  dropout: 0.12
+
+forecast:
+  seq_len: 96
+  pred_len: 96
+
+physics:
+  huber_delta: 0.8
+  horizon_tau: 36.0
+  physics_mode: soft
+  physics_warmup_epochs: 45
+  physics_ramp_epochs: 90
+  physics_max_scale: 0.3
+  physics_horizon_steps: 24
+  lambda_supersat: 0.12
+  lambda_nonneg: 0.04
+  lambda_solubility: 0.02
+  lambda_reaeration: 0.02
+  lambda_derivative: 0.03
+  derivative_horizon: 16
+  short_horizon_steps: 16
+  short_horizon_weight: 2.0
+  short_horizon_tail_weight: 0.75
+  short_horizon_epoch_fraction: 0.5
+  k_reaer: 0.4
+  dt_hours: 0.25
+
+training:
+  device: auto
+  seed: 42
+  batch_size: 32
+  epochs: 150
+  learning_rate: 0.0003
+  weight_decay: 0.02
+  grad_clip: 0.5
+  lr_scheduler: cosine_warmup
+  warmup_epochs: 20
+  warmup_start_factor: 0.15
+  min_lr: 5.0e-7
+  enable_early_stopping: true
+  early_stopping_patience: 35
+  min_epochs: 50
+  use_ema_for_best: true
+  ema_decay: 0.9
+  monitor_key: val_phys_mean_rmse
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+  save_last_every_epoch: true
+  checkpoint_every_epochs: 10
+  keep_last_n_epoch_checkpoints: 5
+  eval_physical_every_epochs: 1
+  skip_nan_batches: true
+  max_consecutive_nan_epochs: 3
+  num_workers: 0
+  pin_memory: false
+
+metrics:
+  hypoxia_threshold_mg_l: 2.0
+  hypoxia_sensitivity_mg_l: 3.0
+  sudden_drop_mg_l: 1.0
+  sudden_drop_steps: 4
+
+explain:
+  explain_hypoxia: false
+  background_samples: 50
+  figures_dir: "figures"
+  use_shap: false
