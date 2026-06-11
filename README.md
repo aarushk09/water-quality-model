@@ -130,24 +130,75 @@ Output: ŷ: [B, N, H_pred, 2]
 
 `models/gat_layer.py` — `SpatialGAT`
 
-Node features are mixed across the directed graph via Graph Attention (GAT). The attention coefficient from node $j$ to node $i$ includes the edge attribute $\mathbf{e}_{ij}$ encoding the travel-time lag between stations:
+Node features are mixed across the directed graph via Graph Attention (GAT). The attention coefficient from node $j$ to node $i$ includes the edge attribute $e_{ij}$ encoding the travel-time lag between stations:
 
-$$\alpha_{ij} = \frac{\exp\!\left(\text{LeakyReLU}\bigl(\mathbf{a}^\top [\mathbf{W}\mathbf{h}_i \| \mathbf{W}\mathbf{h}_j \| \mathbf{e}_{ij}]\bigr)\right)}{\sum_{k} \exp\!\left(\text{LeakyReLU}\bigl(\mathbf{a}^\top [\mathbf{W}\mathbf{h}_i \| \mathbf{W}\mathbf{h}_k \| \mathbf{e}_{ik}]\bigr)\right)}$$
+```math
+\alpha_{ij} =
+\frac{
+\exp\left(
+\mathrm{LeakyReLU}
+\left(
+a^\top [Wh_i \,\|\, Wh_j \,\|\, e_{ij}]
+\right)
+\right)
+}{
+\sum_k
+\exp\left(
+\mathrm{LeakyReLU}
+\left(
+a^\top [Wh_i \,\|\, Wh_k \,\|\, e_{ik}]
+\right)
+\right)
+}
+```
 
 ### PatchTST Encoder (Temporal)
 
 `models/patchtst.py` — `PatchTSTEncoder`
 
-The sequence is divided into overlapping patches of length $P=16$ with stride $S=8$, projecting each patch into a $d_\text{model}$-dimensional token. A learned **horizon decoder** with cross-attention maps from the patch token sequence to the prediction horizon $H_\text{pred} = 96$. A residual connection adds the last observed timestep to force incremental learning: $\hat{\mathbf{y}} = \mathbf{x}_{T} + \Delta\hat{\mathbf{y}}_\text{PatchTST}$
+The sequence is divided into overlapping patches of length $P=16$ with stride $S=8$, projecting each patch into a $d_{\text{model}}$-dimensional token. A learned **horizon decoder** with cross-attention maps from the patch token sequence to the prediction horizon $H_{\text{pred}} = 96$. A residual connection adds the last observed timestep to force incremental learning:
+
+```math
+\hat{y} = x_T + \Delta \hat{y}_{\text{PatchTST}}
+```
 
 ### Koopman Operator Module
 
 `models/koopman_encoder.py` — `KoopmanEncoder`
 
-Learns a neural lifting $\phi: \mathbb{R}^F \to \mathbb{R}^d$ such that nonlinear river dynamics become **linear** in the lifted space: $\mathbf{z}_{t+1} \approx \mathbf{K}\,\mathbf{z}_t, \quad \mathbf{z}_t = \phi(\mathbf{x}_t)$
+Learns a neural lifting $\phi : \mathbb{R}^F \rightarrow \mathbb{R}^d$ such that nonlinear river dynamics become **linear** in the lifted space:
+
+```math
+z_{t+1} \approx K z_t,
+\qquad
+z_t = \phi(x_t)
+```
 
 The module is trained with a **triple loss** plus spectral regularization:
-$$\mathcal{L}_\text{Koopman} = \lambda_r \|D(E(\mathbf{x})) - \mathbf{x}\|^2 + \lambda_p \|\mathbf{K}\,E(\mathbf{x}_t) - E(\mathbf{x}_{t+1})\|^2 + \lambda_m \|\mathbf{K}^n\,E(\mathbf{x}_t) - E(\mathbf{x}_{t+n})\|^2 + \lambda_s \left(\|\mathbf{K}\|_F - \rho^*\sqrt{d}\right)^2$$
+
+```math
+\mathcal{L}_{\text{Koopman}}
+=
+\lambda_r
+\left\|
+D(E(x)) - x
+\right\|^2
++
+\lambda_p
+\left\|
+K E(x_t) - E(x_{t+1})
+\right\|^2
++
+\lambda_m
+\left\|
+K^n E(x_t) - E(x_{t+n})
+\right\|^2
++
+\lambda_s
+\left(
+\|K\|_F - \rho^* \sqrt{d}
+\right)^2
+```
 
 ### Physics-Informed Loss
 
@@ -155,28 +206,103 @@ $$\mathcal{L}_\text{Koopman} = \lambda_r \|D(E(\mathbf{x})) - \mathbf{x}\|^2 + \
 
 The training objective combines a weighted forecast loss with thermodynamic constraint penalties applied in physical units:
 
-1. **Supersaturation penalty**: $\left\langle\left(\frac{\text{ReLU}(\widehat{\text{DO}} - \text{DO}^*(T))}{\text{DO}^*(T)}\right)^2\right\rangle$
-2. **Reaeration residual**: $\left|\frac{\Delta\widehat{\text{DO}}}{\Delta t} - k_r\bigl(\text{DO}^* - \widehat{\text{DO}}\bigr)\right|$
+1. **Supersaturation penalty**:
+
+```math
+\left\langle
+\left(
+\frac{
+\mathrm{ReLU}
+\left(
+\widehat{\mathrm{DO}} - \mathrm{DO}^*(T)
+\right)
+}{
+\mathrm{DO}^*(T)
+}
+\right)^2
+\right\rangle
+```
+
+2. **Reaeration residual**:
+
+```math
+\left|
+\frac{\Delta \widehat{\mathrm{DO}}}{\Delta t}
+-
+k_r
+\left(
+\mathrm{DO}^* - \widehat{\mathrm{DO}}
+\right)
+\right|
+```
+
 3. **Temperature derivative matching**: penalizes thermally implausible heating/cooling rates.
+
 4. **Diurnal amplitude penalty**: asymmetric penalty for under-predicting the diurnal range (prevents peak smoothing).
 
 ### Conditional Diffusion Forecaster
 
 `models/diffusion_forecaster.py` — `DiffusionForecaster`
 
-For calibrated probabilistic forecasting, a conditional score-based diffusion model is trained on top of the frozen PatchTST encoder. 
+For calibrated probabilistic forecasting, a conditional score-based diffusion model is trained on top of the frozen PatchTST encoder.
 
 **Forward process** (cosine noise schedule):
-$$q(\mathbf{y}_t \mid \mathbf{y}_0) = \mathcal{N}\!\left(\sqrt{\bar{\alpha}_t}\,\mathbf{y}_0,\; (1 - \bar{\alpha}_t)\,\mathbf{I}\right)$$
+
+```math
+q(y_t \mid y_0)
+=
+\mathcal{N}
+\left(
+\sqrt{\bar{\alpha}_t}\, y_0,
+\;
+(1-\bar{\alpha}_t) I
+\right)
+```
 
 **Training objective** (denoising score matching):
-$$\mathcal{L}_\text{diff} = \mathbb{E}_{t,\,\mathbf{y}_0,\,\boldsymbol{\epsilon}}\left[\|\boldsymbol{\epsilon} - \boldsymbol{\epsilon}_\theta(\mathbf{y}_t, t, \mathbf{c})\|^2\right]$$
+
+```math
+\mathcal{L}_{\text{diff}}
+=
+\mathbb{E}_{t,\,y_0,\,\epsilon}
+\left[
+\left\|
+\epsilon
+-
+\epsilon_\theta
+(
+y_t,\,
+t,\,
+c
+)
+\right\|^2
+\right]
+```
 
 **Physics filter:** Samples violating the DO saturation ceiling are down-weighted via importance resampling:
-$$w_i \propto \exp\!\left(-5 \cdot \frac{1}{H}\sum_k \text{ReLU}(\widehat{\text{DO}}^{(i)}_k - \text{DO}^*(\hat{T}^{(i)}_k))\right)$$
+
+```math
+w_i
+\propto
+\exp
+\left(
+-5
+\cdot
+\frac{1}{H}
+\sum_k
+\mathrm{ReLU}
+\left(
+\widehat{\mathrm{DO}}^{(i)}_k
+-
+\mathrm{DO}^*
+(
+\hat{T}^{(i)}_k
+)
+\right)
+\right)
+```
 
 ---
-
 ## Feature Engineering
 
 **Solar forcing features** (computed analytically from lat/lon + timestamp):
