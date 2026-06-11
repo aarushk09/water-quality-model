@@ -335,7 +335,7 @@ w_i
 
 Python ≥ 3.9 required.
 ```bash
-git clone <repo>
+git clone [<repo>](https://github.com/aarushk09/water-quality-model.git)
 cd research
 python3 -m venv myenv
 source myenv/bin/activate
