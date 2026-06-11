@@ -21,6 +21,7 @@ class PhysicsLossConfig:
     lambda_solubility: float = 0.02
     lambda_reaeration: float = 0.03
     lambda_derivative: float = 0.05
+    lambda_amplitude: float = 0.10       # NEW: diurnal amplitude matching
     derivative_horizon: int = 24
     physics_warmup_epochs: int = 0
     physics_ramp_epochs: int = 20
@@ -33,6 +34,9 @@ class PhysicsLossConfig:
     short_horizon_tail_weight: float = 0.5
     k_reaer: float = 0.5
     dt_hours: float = 0.25
+    # Per-variable loss weights: upweight DO which is harder to predict
+    temp_loss_weight: float = 1.0
+    do_loss_weight: float = 2.0
 
 
 @dataclass
@@ -104,20 +108,52 @@ class PhysicsInformedLoss:
     ) -> torch.Tensor:
         b, n, h, _ = y_pred.shape
         hw = self._horizon_weights(h, y_pred.device)
-        loss = self._masked_weighted_mae(y_pred, y_true, mask, hw)
+
+        # Per-variable weighted MAE (upweight DO)
+        var_w = torch.tensor(
+            [self.cfg.temp_loss_weight, self.cfg.do_loss_weight],
+            device=y_pred.device, dtype=torch.float32
+        ).view(1, 1, 1, 2)
+        yp_phys = self._to_physical(y_pred)
+        yt_phys = self._to_physical(y_true)
+        loss_elem = F.l1_loss(yp_phys, yt_phys, reduction="none") * var_w
+        hw_view = hw.view(1, 1, -1, 1)
+        loss_elem = loss_elem * hw_view
+        if mask is not None:
+            m = mask.view(-1, n, 1, 1)
+            denom = (m.sum() * 2 * h * hw.sum()).clamp(min=1.0)
+            loss = (loss_elem * m).sum() / denom
+        else:
+            loss = loss_elem.mean()
+
+        # Short-horizon emphasis
         sh = min(self.cfg.short_horizon_steps, h)
-        short = self._masked_weighted_mae(
-            y_pred[:, :, :sh],
-            y_true[:, :, :sh],
-            mask,
-            hw[:sh],
-        )
+        sh_elem = F.l1_loss(yp_phys[:, :, :sh], yt_phys[:, :, :sh], reduction="none") * var_w
+        sh_elem = sh_elem * hw_view[:, :, :sh]
+        if mask is not None:
+            m = mask.view(-1, n, 1, 1)
+            sh_denom = (m.sum() * 2 * sh * hw[:sh].sum()).clamp(min=1.0)
+            short = (sh_elem * m).sum() / sh_denom
+        else:
+            short = sh_elem.mean()
+
         frac = self.cfg.short_horizon_epoch_fraction
         if self.current_epoch <= int(self.max_epochs * frac):
             w = self.cfg.short_horizon_weight
         else:
             w = self.cfg.short_horizon_tail_weight
         loss = loss + w * short
+
+        # Amplitude penalty: penalize under-prediction of diurnal range
+        # This directly targets the peak-smoothing problem
+        if self.cfg.lambda_amplitude > 0:
+            pred_range = yp_phys.max(dim=2).values - yp_phys.min(dim=2).values  # [B,N,2]
+            true_range = yt_phys.max(dim=2).values - yt_phys.min(dim=2).values  # [B,N,2]
+            # Penalize under-prediction of amplitude (asymmetric: smoothing is worse)
+            amp_err = F.relu(true_range - pred_range)  # only penalize under-prediction
+            amplitude_loss = (amp_err * var_w.squeeze(2).squeeze(2)).mean()
+            loss = loss + self.cfg.lambda_amplitude * amplitude_loss
+
         return loss
 
     def __call__(
@@ -178,4 +214,6 @@ class PhysicsInformedLoss:
             "physics_supersat": supersat,
             "physics_derivative": deriv,
             "short_horizon_loss": torch.tensor(0.0, device=device),
+            "physics_nonneg": nonneg,
+            "physics_reaeration": reaer,
         }

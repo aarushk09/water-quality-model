@@ -142,6 +142,8 @@ def _normalize_site_iv_df(df: pd.DataFrame) -> pd.DataFrame:
             cols.append(opt)
     if "dissolved_oxygen" not in df.columns:
         df["dissolved_oxygen"] = np.nan
+    if "temperature" not in df.columns:
+        df["temperature"] = np.nan
     return df[cols].sort_values("datetime")
 
 
@@ -244,10 +246,47 @@ def build_dataloaders_from_config(
         site_filter = data_cfg.get("sites")
         if site_filter:
             keep = [str(s) for s in site_filter]
-            site_ids = [s for s in site_ids if s in keep]
+            # Build new-index mapping from old site ordering
+            old_site_ids = list(site_ids)   # full list before filter
+            site_ids = [s for s in old_site_ids if s in keep]
+            keep_set  = set(site_ids)
+            old_to_new = {old_site_ids.index(s): i for i, s in enumerate(site_ids)}
+
             if len(site_ids) == 1:
                 edge_index_np = self_loop_edge_index(1)
                 edge_attr_np = None
+            elif edge_index_np is not None:
+                # Keep only edges whose both endpoints are in the filtered set,
+                # then remap indices to new 0-based ordering.
+                old_n = len(old_site_ids)
+                valid_mask = np.array([
+                    int(edge_index_np[0, e]) in old_to_new
+                    and int(edge_index_np[1, e]) in old_to_new
+                    for e in range(edge_index_np.shape[1])
+                ])
+                ei_kept = edge_index_np[:, valid_mask]
+                # Vectorized remap
+                src_new = np.array([old_to_new[int(v)] for v in ei_kept[0]])
+                dst_new = np.array([old_to_new[int(v)] for v in ei_kept[1]])
+                edge_index_np = np.stack([src_new, dst_new], axis=0)
+                if edge_attr_np is not None:
+                    edge_attr_np = edge_attr_np[valid_mask]
+
+                # Ensure every node has a self-loop
+                n_new = len(site_ids)
+                has_self = set(zip(edge_index_np[0], edge_index_np[1]))
+                extra_src, extra_dst = [], []
+                for i in range(n_new):
+                    if (i, i) not in has_self:
+                        extra_src.append(i)
+                        extra_dst.append(i)
+                if extra_src:
+                    sl = np.array([extra_src, extra_dst], dtype=np.int64)
+                    edge_index_np = np.concatenate([edge_index_np, sl], axis=1)
+                    if edge_attr_np is not None:
+                        edge_attr_np = np.concatenate(
+                            [edge_attr_np, np.zeros((len(extra_src), edge_attr_np.shape[1]))], axis=0
+                        )
         raw_panels = [_load_site_data(root, site, data_cfg) for site in site_ids]
         if len(raw_panels) > 1:
             site_dfs, time_index = _align_multi_site(raw_panels, site_ids, resample)

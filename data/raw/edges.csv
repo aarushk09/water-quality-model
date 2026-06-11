@@ -1,4 +1,5 @@
-upstream,downstream,travel_minutes,travel_steps
-02334430,02334500,45.0,3
-02334500,02335000,90.0,6
-02335000,02335350,120.0,8
+upstream,downstream,travel_minutes,dam_release
+02334430,02334500,45,True
+02334500,02334885,60,False
+02334885,02335000,90,False
+02335757,02335000,0,False

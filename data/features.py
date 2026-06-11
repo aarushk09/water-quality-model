@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Sequence
 
@@ -66,6 +67,15 @@ DAYMET_FEATURE_COLS = ["daymet_srad", "daymet_tmax", "daymet_prcp", "daymet_vp"]
 
 DAYMET_DERIVED_COLS = ["daymet_srad_ma3d"]
 
+# Computed from lat/lon + timestamp — no API required
+SOLAR_FEATURE_COLS = [
+    "solar_zenith_cos",     # cos(zenith angle) — proxy for shortwave intensity
+    "clearsky_rad",         # theoretical clear-sky irradiance (W/m²)
+    "temp_range_24h",       # diurnal thermal amplitude over past 24h
+    "temp_range_48h",       # 48h thermal range (multi-day regime)
+    "do_diurnal_phase",     # phase of DO within its diurnal cycle (0-1)
+]
+
 
 def do_saturation_np(temperature_c: np.ndarray) -> np.ndarray:
     """Benson–Krause freshwater DO saturation (mg/L)."""
@@ -81,6 +91,57 @@ def do_saturation_np(temperature_c: np.ndarray) -> np.ndarray:
     return np.exp(ln_do)
 
 
+# Chattahoochee River, near Buford GA — used for computed solar features
+_DEFAULT_LAT = 34.18
+_DEFAULT_LON = -84.09
+
+
+def _solar_zenith_cos(dt: pd.Series, lat_deg: float = _DEFAULT_LAT) -> np.ndarray:
+    """Approximate cos(solar zenith angle) from hour-of-day and day-of-year.
+    Uses simplified Spencer equation — no API needed."""
+    lat = math.radians(lat_deg)
+    doy = dt.dt.dayofyear.values.astype(float)
+    # Solar declination (Spencer 1971)
+    B = (2 * math.pi / 365) * (doy - 1)
+    decl = (
+        0.006918
+        - 0.399912 * np.cos(B)
+        + 0.070257 * np.sin(B)
+        - 0.006758 * np.cos(2 * B)
+        + 0.000907 * np.sin(2 * B)
+        - 0.002697 * np.cos(3 * B)
+        + 0.00148 * np.sin(3 * B)
+    )
+    # Equation of time (minutes)
+    eqt = 229.18 * (
+        0.000075
+        + 0.001868 * np.cos(B)
+        - 0.032077 * np.sin(B)
+        - 0.014615 * np.cos(2 * B)
+        - 0.04089 * np.sin(2 * B)
+    )
+    # Hour angle in radians
+    hour_frac = dt.dt.hour.values + dt.dt.minute.values / 60.0 + eqt / 60.0
+    ha = math.radians(15) * (hour_frac - 12.0)
+    cos_z = np.sin(lat) * np.sin(decl) + np.cos(lat) * np.cos(decl) * np.cos(ha)
+    return np.clip(cos_z, 0.0, 1.0)
+
+
+def _clearsky_irradiance(cos_z: np.ndarray, doy: np.ndarray) -> np.ndarray:
+    """Simplified Ineichen clear-sky model: I_cs = I₀ · cos(z) · transmittance.
+    I₀ varies with Earth-Sun distance correction."""
+    B = (2 * math.pi / 365) * (doy - 1)
+    # Eccentricity correction (distance factor)
+    E0 = 1.00011 + 0.034221 * np.cos(B) + 0.00128 * np.sin(B)
+    I0 = 1361.0 * E0  # W/m²
+    # Simple Beer-Lambert atmosphere transmittance
+    # Using typical midlatitude clear-sky optical depth ≈ 0.25
+    with np.errstate(divide="ignore", invalid="ignore"):
+        airmass = np.where(cos_z > 0.087, 1.0 / cos_z, 11.5)  # cap at AM≈11.5
+    tau = np.exp(-0.25 * airmass)
+    return I0 * cos_z * tau
+
+
 def build_feature_columns(
     has_discharge: bool = False,
     has_gage: bool = False,
@@ -88,8 +149,11 @@ def build_feature_columns(
     has_dam: bool = False,
     has_cross_site: bool = False,
     has_daymet: bool = False,
+    has_solar: bool = True,
 ) -> List[str]:
     cols = list(BASE_FEATURE_COLS)
+    if has_solar:
+        cols.extend(SOLAR_FEATURE_COLS)
     if has_meteo:
         cols.extend(METEO_FEATURE_COLS)
         cols.extend(METEO_DERIVED_COLS)
@@ -121,6 +185,9 @@ class FeatureEngineer:
     has_dam: bool = False
     has_cross_site: bool = False
     has_daymet: bool = False
+    has_solar: bool = True
+    site_lat: float = _DEFAULT_LAT
+    site_lon: float = _DEFAULT_LON
     meteo_col_indices: Optional[List[int]] = field(default_factory=list)
 
     def build_features(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -189,6 +256,31 @@ class FeatureEngineer:
                 out["daymet_srad"].rolling(96 * 3, min_periods=1).mean()
             )
 
+        # Computed solar features — purely from lat/lon + timestamp, no API
+        if self.has_solar:
+            cos_z = _solar_zenith_cos(out["datetime"], lat_deg=self.site_lat)
+            doy = out["datetime"].dt.dayofyear.values.astype(float)
+            cs_rad = _clearsky_irradiance(cos_z, doy)
+            out["solar_zenith_cos"] = cos_z
+            out["clearsky_rad"] = cs_rad
+            # Thermal range features (multi-timescale inertia)
+            out["temp_range_24h"] = (
+                out["temperature"].rolling(96, min_periods=4).max()
+                - out["temperature"].rolling(96, min_periods=4).min()
+            ).fillna(0.0)
+            out["temp_range_48h"] = (
+                out["temperature"].rolling(192, min_periods=4).max()
+                - out["temperature"].rolling(192, min_periods=4).min()
+            ).fillna(0.0)
+            # DO diurnal phase (normalized 0–1 within daily range)
+            do_feat_solar = out["dissolved_oxygen"].fillna(0.0)
+            do_daily_min = do_feat_solar.rolling(96, min_periods=4).min()
+            do_daily_max = do_feat_solar.rolling(96, min_periods=4).max()
+            do_range = (do_daily_max - do_daily_min).clip(lower=0.01)
+            out["do_diurnal_phase"] = (
+                (do_feat_solar - do_daily_min) / do_range
+            ).clip(0.0, 1.0).fillna(0.5)
+
         for col in CROSS_SITE_COLS:
             if col not in out.columns:
                 out[col] = 0.0
@@ -205,6 +297,8 @@ class FeatureEngineer:
         self.has_dam = "gage_height" in train_df.columns
         self.has_cross_site = any(c in train_df.columns for c in CROSS_SITE_COLS)
         self.has_daymet = any(c in train_df.columns for c in DAYMET_FEATURE_COLS)
+        # Solar features are always computed (lat/lon only)
+        self.has_solar = True
         self.feature_cols = build_feature_columns(
             self.has_discharge,
             self.has_gage,
@@ -212,6 +306,7 @@ class FeatureEngineer:
             self.has_dam,
             self.has_cross_site,
             self.has_daymet,
+            has_solar=self.has_solar,
         )
         train_feat = self.build_features(train_df)
         self.feature_scaler = StandardScaler()

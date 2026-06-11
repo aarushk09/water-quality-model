@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal, Optional, Tuple
+from typing import Dict, Literal, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -10,6 +10,7 @@ import torch.nn as nn
 from models.dlinear import DLinear
 from models.gat_layer import SpatialGAT, apply_gat_over_time
 from models.itransformer import iTransformerEncoder
+from models.koopman_encoder import KoopmanEncoder
 from models.patchtst import PatchTSTEncoder
 from models.physics_head import PhysicsProjectionHead
 from models.tcn import TCNBackbone
@@ -29,7 +30,7 @@ class SpatioTemporalWaterModel(nn.Module):
         seq_len: int,
         pred_len: int,
         edge_index: torch.Tensor,
-        backbone: Literal["patchtst", "tcn", "dlinear", "itransformer"] = "patchtst",
+        backbone: Literal["patchtst", "tcn", "dlinear", "itransformer", "koopman_patchtst"] = "patchtst",
         gat_hidden: int = 64,
         gat_heads: int = 4,
         gat_dropout: float = 0.1,
@@ -51,6 +52,13 @@ class SpatioTemporalWaterModel(nn.Module):
         use_local_conv: bool = True,
         n_fut_cov: int = 0,
         edge_attr: Optional[torch.Tensor] = None,
+        # Koopman-specific parameters
+        koopman_latent_dim: int = 32,
+        koopman_lambda_recon: float = 1.0,
+        koopman_lambda_pred: float = 1.0,
+        koopman_lambda_multi: float = 0.5,
+        koopman_lambda_spectral: float = 0.01,
+        koopman_loss_weight: float = 0.1,
     ):
         super().__init__()
         self.seq_len = seq_len
@@ -59,7 +67,11 @@ class SpatioTemporalWaterModel(nn.Module):
         self.use_physics_head = use_physics_head
         self.use_residual_baseline = use_residual_baseline
         self.backbone_name = backbone
-        self.skip_gat = backbone in ("dlinear", "itransformer")
+        self.use_koopman = backbone == "koopman_patchtst"
+        self.koopman_loss_weight = koopman_loss_weight
+        # Normalize backbone name for downstream logic
+        _effective_backbone = "patchtst" if self.use_koopman else backbone
+        self.skip_gat = _effective_backbone in ("dlinear", "itransformer")
         self.register_buffer("edge_index", edge_index.long())
         if edge_attr is not None:
             self.register_buffer("edge_attr", edge_attr.float())
@@ -128,6 +140,23 @@ class SpatioTemporalWaterModel(nn.Module):
             )
             self.use_horizon_decoder = use_horizon_decoder
 
+        # Koopman encoder (parallel branch for dynamics discovery)
+        self.koopman: Optional[KoopmanEncoder] = None
+        if self.use_koopman:
+            self.koopman = KoopmanEncoder(
+                n_features=gat_out,
+                latent_dim=koopman_latent_dim,
+                lambda_recon=koopman_lambda_recon,
+                lambda_pred=koopman_lambda_pred,
+                lambda_multi=koopman_lambda_multi,
+                lambda_spectral=koopman_lambda_spectral,
+            )
+            self.koopman.set_proj_dim(d_model)
+            # Koopman context gate: learns how much to blend Koopman vs. PatchTST.
+            # Initialize deep-negative so sigmoid ≈ 0.007 (near-zero Koopman influence
+            # at start). Gate grows naturally as the encoder learns good dynamics.
+            self.koopman_gate = nn.Parameter(torch.tensor(-5.0))  # sigmoid(-5)≈0.007
+
         if use_physics_head and target_mean is not None and target_scale is not None:
             self.physics_head = PhysicsProjectionHead(target_mean, target_scale)
         else:
@@ -143,6 +172,7 @@ class SpatioTemporalWaterModel(nn.Module):
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         b, n, t, f = x.shape
         attn = None
+        koopman_losses = None
 
         if self.skip_gat:
             h_flat = x.reshape(b * n, t, f)
@@ -152,12 +182,31 @@ class SpatioTemporalWaterModel(nn.Module):
                 self.gat, x, self.edge_index, return_attention, edge_attr=self.edge_attr
             )
             h_flat = h.reshape(b * n, t, h.shape[-1])
+
+            # Koopman branch: encode entire sequence, get latent at last step
+            if self.koopman is not None:
+                z_last, koopman_losses = self.koopman(h_flat, return_losses=self.training)
+                # Project Koopman latent into PatchTST query space
+                koopman_proj = self.koopman.project_to_model(z_last)  # [B*N, d_model]
+
             fut_flat = None
             if fut_cov is not None:
                 fut_flat = fut_cov.reshape(b * n, fut_cov.shape[2], fut_cov.shape[3])
-            y_flat, attn = self.backbone(
-                h_flat, return_attention=return_attention, fut_cov=fut_flat
-            )
+
+            if self.koopman is not None and koopman_proj is not None:
+                # Inject Koopman context as an extra token prepended to patch sequence
+                # This lets cross-attention in horizon decoder attend to Koopman dynamics
+                y_flat, attn = self.backbone(
+                    h_flat,
+                    return_attention=return_attention,
+                    fut_cov=fut_flat,
+                    koopman_ctx=koopman_proj,
+                    koopman_gate=torch.sigmoid(self.koopman_gate),
+                )
+            else:
+                y_flat, attn = self.backbone(
+                    h_flat, return_attention=return_attention, fut_cov=fut_flat
+                )
 
         y_hat = y_flat.reshape(b, n, self.pred_len, 2)
 
@@ -169,3 +218,38 @@ class SpatioTemporalWaterModel(nn.Module):
         if apply_physics and self.physics_head is not None:
             y_hat, _ = self.physics_head(y_hat)
         return y_hat, attn
+
+    def get_koopman_losses(self) -> Optional[Dict[str, torch.Tensor]]:
+        """Returns Koopman auxiliary losses (call after forward in training loop)."""
+        return None  # losses returned directly from forward; stored here for legacy API
+
+    def get_patch_tokens(
+        self, x: torch.Tensor
+    ) -> Optional[torch.Tensor]:
+        """
+        Extract PatchTST patch tokens for use as conditioning signal in diffusion.
+        Returns [B, P, d_model] patch token sequence.
+        """
+        x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        b, n, t, f = x.shape
+        if self.skip_gat:
+            h_flat = x.reshape(b * n, t, f)
+        else:
+            h, _ = apply_gat_over_time(self.gat, x, self.edge_index, False)
+            h_flat = h.reshape(b * n, t, h.shape[-1])
+
+        if not hasattr(self.backbone, "patch_embed") or not hasattr(self.backbone, "encoder"):
+            return None
+
+        # Run through PatchTST up to encoder (before horizon decoder)
+        bb = self.backbone
+        xr = h_flat
+        if bb.use_revin:
+            xr = bb.revin.norm(xr)
+        if bb.use_local_conv:
+            xr = bb.local_conv(xr.transpose(1, 2)).transpose(1, 2)
+        emb, _ = bb.patch_embed(xr)
+        tokens = bb.encoder(emb)  # [B*N, P, d_model]
+        # Use forecast node only
+        tokens = tokens.view(b, n, tokens.shape[1], tokens.shape[2])[:, 0]  # [B, P, d_model]
+        return tokens

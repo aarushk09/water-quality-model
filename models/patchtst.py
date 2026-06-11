@@ -111,9 +111,13 @@ class PatchTSTEncoder(nn.Module):
         x: torch.Tensor,
         return_attention: bool = False,
         fut_cov: Optional[torch.Tensor] = None,
+        koopman_ctx: Optional[torch.Tensor] = None,
+        koopman_gate: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         x: [B, T, C] -> y: [B, pred_len, n_targets]
+        koopman_ctx: optional [B, d_model] — Koopman latent projection
+        koopman_gate: optional scalar — learned blend weight (0=ignore, 1=full blend)
         """
         if self.use_revin:
             x = self.revin.norm(x)
@@ -122,6 +126,13 @@ class PatchTSTEncoder(nn.Module):
             x = self.local_conv(x.transpose(1, 2)).transpose(1, 2)
 
         emb, _ = self.patch_embed(x)
+
+        # Inject Koopman global dynamics context into all patch positions
+        if koopman_ctx is not None:
+            gate = koopman_gate if koopman_gate is not None else torch.tensor(0.1, device=emb.device)
+            # koopman_ctx: [B, d_model] -> broadcast to [B, 1, d_model]
+            emb = emb + gate * koopman_ctx.unsqueeze(1)
+
         encoded = self.encoder(emb)
 
         if self.use_horizon_decoder:

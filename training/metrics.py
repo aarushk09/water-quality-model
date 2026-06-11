@@ -1,4 +1,4 @@
-"""Evaluation metrics including hypoxia-event detection."""
+"""Evaluation metrics including hypoxia-event detection, CRPS, and diurnal tracking."""
 
 from __future__ import annotations
 
@@ -115,3 +115,99 @@ def evaluate_batch_physical(
 
 def mean_physical_rmse(metrics: Dict[str, float]) -> float:
     return (metrics["temperature_rmse"] + metrics["dissolved_oxygen_rmse"]) / 2.0
+
+
+def persistence_skill_score(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    last_obs: np.ndarray,
+) -> Dict[str, float]:
+    """
+    Skill score relative to persistence baseline: SS = 1 - MSE_model / MSE_persist
+    SS > 0 means model beats persistence; SS = 1 is perfect.
+
+    y_true, y_pred, last_obs: [..., 2] — last dim = [temp, DO]
+    last_obs: the last observed value before the forecast horizon (the persistence forecast)
+    """
+    out = {}
+    for i, name in enumerate(TARGET_NAMES):
+        yt = y_true[..., i].ravel()
+        yp = y_pred[..., i].ravel()
+        # last_obs: [N, 2] → expand to match y_true shape [N, H, 2] → ravel
+        lo_i = last_obs[..., i]  # [N] or [N, 1, ...]
+        # Broadcast last_obs to full horizon shape
+        while lo_i.ndim < y_true[..., i].ndim:
+            lo_i = np.expand_dims(lo_i, axis=-1)
+        persist = np.broadcast_to(lo_i, y_true[..., i].shape).ravel()
+        valid = np.isfinite(yt) & np.isfinite(yp) & np.isfinite(persist)
+        if not valid.any():
+            out[f"{name}_skill"] = float("nan")
+            continue
+        mse_model = mean_squared_error(yt[valid], yp[valid])
+        mse_persist = mean_squared_error(yt[valid], persist[valid])
+        out[f"{name}_skill"] = float(1.0 - mse_model / (mse_persist + 1e-8))
+    return out
+
+
+
+def diurnal_amplitude_tracking(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    horizon: int = 96,  # full 24h
+) -> Dict[str, float]:
+    """
+    Measures how well the model tracks the diurnal amplitude.
+
+    Computes correlation between predicted and observed diurnal ranges
+    across all windows. Low correlation = model is smoothing the peaks.
+
+    y_true, y_pred: [N, H, 2] or [N, H] — N windows, H timesteps
+    """
+    out = {}
+    if y_true.ndim == 2:
+        y_true = y_true[:, :, np.newaxis]
+        y_pred = y_pred[:, :, np.newaxis]
+    n_vars = min(y_true.shape[-1], 2)
+    for i in range(n_vars):
+        name = TARGET_NAMES[i]
+        yt = y_true[:, :, i]  # [N, H]
+        yp = y_pred[:, :, i]
+        # Diurnal range per window
+        true_range = yt.max(axis=1) - yt.min(axis=1)  # [N]
+        pred_range = yp.max(axis=1) - yp.min(axis=1)
+        valid = np.isfinite(true_range) & np.isfinite(pred_range)
+        if valid.sum() < 5:
+            out[f"{name}_diurnal_corr"] = float("nan")
+            out[f"{name}_diurnal_ratio"] = float("nan")
+        else:
+            corr = np.corrcoef(true_range[valid], pred_range[valid])[0, 1]
+            ratio = pred_range[valid].mean() / (true_range[valid].mean() + 1e-8)
+            out[f"{name}_diurnal_corr"] = float(corr)
+            out[f"{name}_diurnal_ratio"] = float(ratio)
+    return out
+
+
+def crps_gaussian(
+    y_true: np.ndarray,
+    y_mean: np.ndarray,
+    y_std: np.ndarray,
+) -> Dict[str, float]:
+    """
+    Closed-form CRPS for Gaussian predictive distribution.
+    CRPS(N(μ,σ), y) = σ[2φ(z) + zΦ(z) - 1/√π] where z = (y-μ)/σ
+
+    y_true, y_mean, y_std: [..., 2]
+    """
+    from scipy import stats as scipy_stats
+    out = {}
+    for i, name in enumerate(TARGET_NAMES):
+        if i >= y_true.shape[-1]:
+            break
+        yt = y_true[..., i].ravel()
+        mu = y_mean[..., i].ravel()
+        sigma = np.abs(y_std[..., i].ravel()) + 1e-6
+        z = (yt - mu) / sigma
+        crps = sigma * (2 * scipy_stats.norm.pdf(z) + z * (2 * scipy_stats.norm.cdf(z) - 1)
+                        - 1.0 / np.sqrt(np.pi))
+        out[f"{name}_crps"] = float(np.nanmean(crps))
+    return out

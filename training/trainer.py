@@ -35,6 +35,8 @@ LOG_FIELDNAMES = [
     "train_loss",
     "train_mse",
     "train_physics_violation",
+    "train_physics_nonneg",
+    "train_physics_reaeration",
     "val_loss",
     "val_mse",
     "val_physics_violation",
@@ -140,6 +142,7 @@ class Trainer:
             lambda_solubility=phys_cfg.get("lambda_solubility", 0.05),
             lambda_reaeration=phys_cfg.get("lambda_reaeration", 0.1),
             lambda_derivative=phys_cfg.get("lambda_derivative", 0.2),
+            lambda_amplitude=phys_cfg.get("lambda_amplitude", 0.10),
             derivative_horizon=phys_cfg.get("derivative_horizon", 24),
             physics_warmup_epochs=phys_cfg.get("physics_warmup_epochs", 40),
             physics_ramp_epochs=phys_cfg.get("physics_ramp_epochs", 80),
@@ -152,6 +155,8 @@ class Trainer:
             short_horizon_tail_weight=phys_cfg.get("short_horizon_tail_weight", 0.5),
             k_reaer=phys_cfg.get("k_reaer", 0.5),
             dt_hours=phys_cfg.get("dt_hours", 0.25),
+            temp_loss_weight=phys_cfg.get("temp_loss_weight", 1.0),
+            do_loss_weight=phys_cfg.get("do_loss_weight", 2.0),
         )
         self.criterion = PhysicsInformedLoss(
             target_mean=torch.tensor(ts.mean_, dtype=torch.float32),
@@ -171,6 +176,11 @@ class Trainer:
         self.eval_physical_every = int(train_cfg.get("eval_physical_every_epochs", 5))
         self.skip_nan_batches = train_cfg.get("skip_nan_batches", True)
         self.max_nan_epochs = int(train_cfg.get("max_consecutive_nan_epochs", 3))
+
+        # Koopman auxiliary loss warmup (ramp weight 0→target over N epochs)
+        model_cfg = cfg.get("model", {})
+        self.koopman_warmup_epochs = int(model_cfg.get("koopman_warmup_epochs", 20))
+        self._current_epoch = 1  # updated in fit() each epoch
 
         self.ckpt_dir = Path(train_cfg["checkpoint_dir"])
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -246,6 +256,39 @@ class Trainer:
         y_hat, _ = self.model(x, fut_cov=fut_cov)
         out = self.criterion(y_hat, y, mask)
         loss = out["loss"]
+
+        # Add Koopman auxiliary loss if model has Koopman branch
+        if hasattr(self.model, "koopman") and self.model.koopman is not None:
+            from models.gat_layer import apply_gat_over_time
+            x_clean = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+            b, n, t, f = x_clean.shape
+            if not self.model.skip_gat:
+                h, _ = apply_gat_over_time(
+                    self.model.gat, x_clean, self.model.edge_index, False,
+                    edge_attr=self.model.edge_attr
+                )
+                h_flat = h.reshape(b * n, t, h.shape[-1])
+            else:
+                h_flat = x_clean.reshape(b * n, t, f)
+
+            # CRITICAL: detach h_flat so Koopman gradients do NOT flow back into the
+            # shared GAT encoder. The Koopman encoder is a scientific side-branch that
+            # learns the dynamics of the representation — it must not reshape the latent
+            # space in ways that degrade the primary forecast objective.
+            _, k_losses = self.model.koopman(h_flat.detach(), return_losses=True)
+            if k_losses is not None:
+                k_loss = k_losses["koopman_total"]
+                # Linear warmup: ramp Koopman weight from 0 → target over warmup window
+                k_warmup = int(getattr(self, "koopman_warmup_epochs", 20))
+                cur_ep   = getattr(self, "_current_epoch", 1)
+                warmup_frac = min(1.0, cur_ep / max(k_warmup, 1))
+                effective_k_weight = self.model.koopman_loss_weight * warmup_frac
+                loss = loss + effective_k_weight * k_loss
+                out["koopman_total"] = k_losses["koopman_total"]
+                out["koopman_recon"] = k_losses["koopman_recon"]
+                out["koopman_pred"] = k_losses["koopman_pred"]
+
+        out["loss"] = loss
         if not torch.isfinite(loss):
             if self.skip_nan_batches:
                 return None
@@ -435,6 +478,7 @@ class Trainer:
             if self._interrupted:
                 break
 
+            self._current_epoch = epoch  # expose to train_batch for Koopman warmup
             self.criterion.current_epoch = epoch
             train_m = self.train_epoch()
             val_m = self.eval_epoch(self.bundle.val_loader, prefix="val")

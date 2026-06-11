@@ -2,18 +2,22 @@
   {
     "site_no": "02334500",
     "paired_fraction": 0.9972110827561065,
-    "role": "forecast",
-    "lat": 34.1261111,
-    "lon": -84.09338889,
-    "name": "CHATTAHOOCHEE RIVER NEAR BUFORD, GA"
+    "role": "auxiliary",
+    "lat": 34.1801,
+    "lon": -84.0927,
+    "name": "Chattahoochee R. near Buford GA",
+    "dam_controlled": false,
+    "order": 1
   },
   {
     "site_no": "02335000",
     "paired_fraction": 0.9904317181289541,
     "role": "auxiliary",
-    "lat": 33.9972222,
-    "lon": -84.2019444,
-    "name": "CHATTAHOOCHEE RIVER NEAR NORCROSS, GA"
+    "lat": 33.9735,
+    "lon": -84.2155,
+    "name": "Chattahoochee R. at Norcross GA",
+    "dam_controlled": false,
+    "order": 3
   },
   {
     "site_no": "02335350",
@@ -22,5 +26,32 @@
     "lat": 33.965,
     "lon": -84.2647222,
     "name": "CROOKED CREEK NEAR NORCROSS, GA"
+  },
+  {
+    "site_no": "02334430",
+    "name": "Chattahoochee R. above Buford Dam NR Buford GA",
+    "lat": 34.1743,
+    "lon": -84.0977,
+    "dam_controlled": true,
+    "order": 0,
+    "role": "upstream_dam"
+  },
+  {
+    "site_no": "02334885",
+    "name": "Chattahoochee R. at Lanier Bridge nr Gainesville GA",
+    "lat": 34.2618,
+    "lon": -83.9352,
+    "dam_controlled": false,
+    "order": 2,
+    "role": "auxiliary"
+  },
+  {
+    "site_no": "02335757",
+    "name": "Suwanee Cr. near Suwanee GA",
+    "lat": 34.0568,
+    "lon": -84.0697,
+    "dam_controlled": false,
+    "order": 2,
+    "role": "auxiliary"
   }
 ]

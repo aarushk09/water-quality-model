@@ -29,14 +29,25 @@ def remap_checkpoint_state_dict(state_dict: dict) -> dict:
 
 def load_state_dict_compatible(model: torch.nn.Module, state_dict: dict) -> None:
     remapped = remap_checkpoint_state_dict(state_dict)
+
+    # Graph topology buffers (edge_index, edge_attr) are set from the current
+    # dataset config and must NOT be restored from checkpoint — the graph
+    # structure may differ between single-site and multi-site runs.
+    TOPOLOGY_KEYS = {"edge_index", "edge_attr"}
+    remapped = {k: v for k, v in remapped.items()
+                if k.split(".")[-1] not in TOPOLOGY_KEYS}
+
     missing, unexpected = model.load_state_dict(remapped, strict=False)
     if unexpected:
         print(f"Warning: ignored unexpected keys: {unexpected[:5]}...")
     if missing:
-        # Only warn about keys that are not unused optional GAT branches
-        critical = [k for k in missing if not k.startswith("gat.conv.")]
+        # Only warn about keys that are not unused optional GAT branches or topology
+        critical = [k for k in missing
+                    if not k.startswith("gat.conv.")
+                    and k.split(".")[-1] not in TOPOLOGY_KEYS]
         if critical:
             print(f"Warning: missing keys when loading checkpoint: {critical[:5]}...")
+
 
 
 @torch.no_grad()
@@ -114,6 +125,13 @@ def build_model_from_bundle(cfg: dict, bundle: DatasetBundle) -> SpatioTemporalW
         use_local_conv=mcfg.get("use_local_conv", True),
         n_fut_cov=len(bundle.feature_engineer.meteo_col_indices),
         edge_attr=bundle.edge_attr,
+        # Koopman parameters
+        koopman_latent_dim=mcfg.get("koopman_latent_dim", 32),
+        koopman_lambda_recon=mcfg.get("koopman_lambda_recon", 1.0),
+        koopman_lambda_pred=mcfg.get("koopman_lambda_pred", 1.0),
+        koopman_lambda_multi=mcfg.get("koopman_lambda_multi", 0.5),
+        koopman_lambda_spectral=mcfg.get("koopman_lambda_spectral", 0.01),
+        koopman_loss_weight=mcfg.get("koopman_loss_weight", 0.1),
     )
 
 

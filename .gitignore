@@ -35,7 +35,9 @@ checkpoints/**/epoch_*.pt
 logs/
 
 # Generated plots and example outputs
-figures/
+figures/*
+!figures/paper/
+!figures/paper/*.png
 fetch_example_out/
 
 # OS / IDE

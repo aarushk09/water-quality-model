@@ -6,6 +6,10 @@ data:
   raw_dir: data/raw
   resample_minutes: 15
   site_no: '02334500'
+  sites:
+  - '02334500'
+  - '02335000'
+  - '02335350'
   stations_json: data/raw/stations.json
   temp_value_column: '334112_00010'
   temperature_rdb: water_temperature.rdb
@@ -14,11 +18,11 @@ data:
 explain:
   background_samples: 50
   explain_hypoxia: false
-  figures_dir: figures
+  figures_dir: figures/koopman
   use_shap: false
 forecast:
   pred_len: 96
-  seq_len: 96
+  seq_len: 192
 meteo:
   enabled: true
   filename: meteo.parquet
@@ -29,16 +33,23 @@ metrics:
   sudden_drop_mg_l: 1.0
   sudden_drop_steps: 4
 model:
-  backbone: patchtst
-  d_model: 192
-  dropout: 0.12
+  backbone: koopman_patchtst
+  d_model: 256
+  dropout: 0.1
   gat_dropout: 0.1
   gat_heads: 4
   gat_hidden: 128
+  koopman_lambda_multi: 0.5
+  koopman_lambda_pred: 1.0
+  koopman_lambda_recon: 1.0
+  koopman_lambda_spectral: 0.01
+  koopman_latent_dim: 32
+  koopman_loss_weight: 0.1
+  koopman_warmup_epochs: 20
   n_heads: 8
-  n_layers: 3
-  patch_len: 12
-  patch_stride: 4
+  n_layers: 4
+  patch_len: 16
+  patch_stride: 8
   use_ar_refinement: true
   use_horizon_decoder: true
   use_local_conv: true
@@ -46,44 +57,47 @@ model:
   use_residual_baseline: true
   use_revin: true
 physics:
-  derivative_horizon: 16
+  derivative_horizon: 24
+  do_loss_weight: 2.0
   dt_hours: 0.25
-  horizon_tau: 36.0
+  horizon_tau: 48.0
   huber_delta: 0.8
   k_reaer: 0.4
-  lambda_derivative: 0.03
-  lambda_nonneg: 0.04
-  lambda_reaeration: 0.02
+  lambda_amplitude: 0.1
+  lambda_derivative: 0.04
+  lambda_nonneg: 0.05
+  lambda_reaeration: 0.03
   lambda_solubility: 0.02
-  lambda_supersat: 0.12
-  physics_horizon_steps: 24
-  physics_max_scale: 0.3
+  lambda_supersat: 0.15
+  physics_horizon_steps: 32
+  physics_max_scale: 0.2
   physics_mode: soft
-  physics_ramp_epochs: 90
-  physics_warmup_epochs: 45
-  short_horizon_epoch_fraction: 0.5
+  physics_ramp_epochs: 50
+  physics_warmup_epochs: 5
+  short_horizon_epoch_fraction: 0.4
   short_horizon_steps: 16
   short_horizon_tail_weight: 0.75
   short_horizon_weight: 2.0
+  temp_loss_weight: 1.0
 project_root: /Users/aarushkute/research
 training:
-  batch_size: 32
-  checkpoint_dir: checkpoints
+  batch_size: 24
+  checkpoint_dir: checkpoints/koopman
   checkpoint_every_epochs: 10
   device: auto
-  early_stopping_patience: 35
-  ema_decay: 0.9
+  early_stopping_patience: 50
+  ema_decay: 0.92
   enable_early_stopping: false
-  epochs: 30
+  epochs: 200
   eval_physical_every_epochs: 1
   grad_clip: 0.5
   keep_last_n_epoch_checkpoints: 5
-  learning_rate: 0.0003
-  log_dir: logs
+  learning_rate: 0.00015
+  log_dir: logs/koopman
   lr_scheduler: cosine_warmup
   max_consecutive_nan_epochs: 3
-  min_epochs: 50
-  min_lr: 5.0e-07
+  min_epochs: 60
+  min_lr: 5.0e-08
   monitor_key: val_phys_mean_rmse
   num_workers: 0
   pin_memory: false
@@ -91,6 +105,6 @@ training:
   seed: 42
   skip_nan_batches: true
   use_ema_for_best: true
-  warmup_epochs: 20
-  warmup_start_factor: 0.15
+  warmup_epochs: 25
+  warmup_start_factor: 0.05
   weight_decay: 0.02

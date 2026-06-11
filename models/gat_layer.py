@@ -64,6 +64,7 @@ class SpatialGAT(nn.Module):
                 dropout=dropout,
                 concat=True,
                 edge_dim=edge_dim,
+                add_self_loops=False,  # We manage topology externally; avoid OOB scatter on batched edge_index
             )
             self.mode = "pyg"
         else:
@@ -166,3 +167,136 @@ def apply_gat_over_time(
     h_bt, _ = gat(x_bt, edge_index, return_attention, edge_attr=edge_attr)
     h = h_bt.view(b, t, n, -1).permute(0, 2, 1, 3)
     return h, None
+
+
+class LagAwareGAT(nn.Module):
+    """
+    Graph Attention with learned travel-time lags for dam-causality modeling.
+
+    Key idea: when computing the message from upstream node j -> downstream node i,
+    shift j's feature history back by tau_{ij} timesteps (the travel-time lag).
+    tau_{ij} is initialized from physical estimates and fine-tuned jointly.
+
+    Novel scientific contribution: plot learned tau_{ij} vs. published travel-time
+    studies to validate causal delay capture.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        num_nodes: int,
+        num_edges: int,
+        heads: int = 4,
+        dropout: float = 0.1,
+        initial_lags: Optional[torch.Tensor] = None,
+        max_lag: int = 32,
+        interpolate_lags: bool = True,
+    ):
+        super().__init__()
+        self.hidden_channels = hidden_channels
+        self.num_nodes = num_nodes
+        self.heads = heads
+        self.dropout_rate = dropout
+        self.max_lag = max_lag
+        self.interpolate_lags = interpolate_lags
+        self.out_dim = hidden_channels
+
+        # Learned lag parameters in log space to enforce >= 0
+        if initial_lags is not None:
+            init_lags = initial_lags.float().clamp(0, max_lag)
+        else:
+            init_lags = torch.zeros(num_edges)
+        self.log_lags = nn.Parameter(torch.log1p(init_lags))
+
+        self.node_proj = nn.Linear(in_channels, hidden_channels)
+        self.msg_net = nn.Sequential(
+            nn.Linear(in_channels + hidden_channels, hidden_channels),
+            nn.GELU(),
+            nn.Linear(hidden_channels, hidden_channels),
+        )
+        self.attn_q = nn.Linear(hidden_channels, heads, bias=False)
+        self.attn_k = nn.Linear(hidden_channels, heads, bias=False)
+        self.out_proj = nn.Linear(hidden_channels, hidden_channels)
+        self.norm = nn.LayerNorm(hidden_channels)
+
+    @property
+    def lags(self) -> torch.Tensor:
+        return torch.expm1(self.log_lags).clamp(0, self.max_lag)
+
+    def _get_lagged_features(self, x_history: torch.Tensor, lag: torch.Tensor) -> torch.Tensor:
+        """Linear interpolation for differentiable lag shift."""
+        b, n, t, f = x_history.shape
+        lag_f = lag.clamp(0, t - 1)
+        lo = lag_f.long().clamp(0, t - 2)
+        hi = (lo + 1).clamp(0, t - 1)
+        frac = lag_f - lo.float()
+        idx_lo = t - 1 - lo
+        idx_hi = t - 1 - hi
+        h_lo = x_history[:, :, idx_lo, :]
+        h_hi = x_history[:, :, idx_hi, :]
+        return h_lo * (1 - frac) + h_hi * frac
+
+    def forward(
+        self,
+        x_history: torch.Tensor,
+        edge_index: torch.Tensor,
+        return_attention: bool = False,
+        edge_attr: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """x_history: [B, N, T, F] -> [B, N, H] at current (last) timestep."""
+        b, n, t, f = x_history.shape
+        lags = self.lags
+        x_now = x_history[:, :, -1, :]
+        h_self = F.relu(self.node_proj(x_now))
+        h_agg = torch.zeros_like(h_self)
+        src_nodes, dst_nodes = edge_index[0], edge_index[1]
+
+        for e in range(edge_index.size(1)):
+            s = int(src_nodes[e].item())
+            d = int(dst_nodes[e].item())
+            if self.interpolate_lags:
+                h_src_lagged = self._get_lagged_features(x_history, lags[e])[:, s, :]
+            else:
+                shift = int(lags[e].round().item())
+                idx = max(0, t - 1 - shift)
+                h_src_lagged = x_history[:, s, idx, :]
+            h_dst = h_self[:, d, :]
+            msg = self.msg_net(torch.cat([h_src_lagged, h_dst], dim=-1))
+            q = self.attn_q(h_dst)
+            k = self.attn_k(F.relu(self.node_proj(h_src_lagged)))
+            attn = torch.sigmoid((q * k).sum(-1, keepdim=True) / (self.heads ** 0.5))
+            h_agg[:, d, :] = h_agg[:, d, :] + attn * msg
+
+        h_out = self.norm(h_self + F.dropout(h_agg, p=self.dropout_rate, training=self.training))
+        return self.out_proj(h_out), None
+
+    @torch.no_grad()
+    def get_learned_lags(self) -> dict:
+        lags = self.lags.cpu().numpy()
+        return {
+            "lags_timesteps": lags,
+            "lags_minutes": lags * 15,
+            "lags_hours": lags * 15 / 60,
+        }
+
+
+def apply_lag_gat(
+    gat: LagAwareGAT,
+    x: torch.Tensor,
+    edge_index: torch.Tensor,
+    return_attention: bool = False,
+    edge_attr: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """
+    Apply LagAwareGAT across the full temporal sequence.
+    x: [B, N, T, F] -> [B, N, T, H]
+    """
+    b, n, t, f = x.shape
+    outputs = []
+    for ti in range(t):
+        x_hist = x[:, :, :ti + 1, :]
+        h, attn = gat(x_hist, edge_index, return_attention, edge_attr)
+        outputs.append(h.unsqueeze(2))
+    result = torch.cat(outputs, dim=2)
+    return result, attn
